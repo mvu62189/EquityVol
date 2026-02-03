@@ -6,27 +6,50 @@ from scipy.optimize import brentq
 N = norm.cdf
 n = norm.pdf
 
-def calculate_implied_forward(calls, puts, r, T):
+def calculate_implied_forward(calls, puts, r, T, S_ref=None):
     """
     Calculates Implied Forward (F) using Put-Call Parity on ATM strikes.
     F = K + e^(rT) * (C - P)
     
     Expects 'calls' and 'puts' to be dataframes/slices for a single expiry.
     """
-    # Merge on Strike to find pairs
-    merged = calls[['strike', 'mid']].merge(puts[['strike', 'mid']], on='strike', suffixes=('_c', '_p'))
+    # 0. range_filter check
+    if S_ref is not None:
+        # Define valid strike window (e.g., 10% around spot)
+        # Deep ITM/OTM options introduce massive spread error into F calc
+        min_k = S_ref * 0.90
+        max_k = S_ref * 1.10
+        
+        calls = calls[(calls['strike'] >= min_k) & (calls['strike'] <= max_k)]
+        puts = puts[(puts['strike'] >= min_k) & (puts['strike'] <= max_k)]
     
-    # Filter for liquid ATM options (Smallest spread, closest to spot?)
-    # Simple proxy: Find strike where abs(C - P) is smallest (closest to ATM)
-    merged['diff'] = abs(merged['mid_c'] - merged['mid_p'])
-    atm_row = merged.loc[merged['diff'].idxmin()]
+    if calls.empty or puts.empty:
+        return np.nan
+
+    # 1. Merge on Strike
+    cols_to_keep = ['strike', 'mid']
+    if 'bid' in calls.columns: cols_to_keep.append('bid')
     
-    K = atm_row['strike']
-    C = atm_row['mid_c']
-    P = atm_row['mid_p']
+    # Merge on Strike to find pairs 
+    merged = calls[cols_to_keep].merge(puts[cols_to_keep], on='strike', suffixes=('_c', '_p'))
     
-    F = K + np.exp(r * T) * (C - P)
-    return F
+    # 2. Filter for active quotes (if bid info available)
+    if 'bid_c' in merged.columns and 'bid_p' in merged.columns:
+        merged = merged[
+            (merged['bid_c'] > 0.05) & 
+            (merged['bid_p'] > 0.05)
+        ]
+    
+    if merged.empty:
+        return np.nan
+
+    # 3. Calculate F candidates
+    # Parity: F = K + exp(rT) * (C - P)
+    merged['F_implied'] = merged['strike'] + np.exp(r * T) * (merged['mid_c'] - merged['mid_p'])
+    
+    # 4. Robust Aggregation (Median of valid pairs)
+    # We trust the median more than the single "best" fit which might be a lucky wide spread
+    return merged['F_implied'].median()
 
 def black_76_price(F, K, T, r, sigma, option_type='C'):
     """

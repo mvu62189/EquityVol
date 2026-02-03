@@ -6,7 +6,7 @@ from analytics.calibration import SurfaceCalibrator
 
 def run_calibration(ticker):
     # 1. Load Processed Data
-    data_dir = os.path.join("data", "processed", ticker.upper())
+    data_dir = os.path.join("data", "clean", ticker.upper())
     # Find latest file
     files = [f for f in os.listdir(data_dir) if f.endswith('.parquet')]
     if not files:

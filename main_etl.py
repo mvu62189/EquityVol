@@ -34,12 +34,28 @@ def run_etl(ticker_symbol: str):
     processed_path = full_path.replace("raw", "processed")
     os.makedirs(os.path.dirname(processed_path), exist_ok=True)
     df_processed.to_parquet(processed_path, index=False)
-    print(f"Processed saved: {processed_path}")
+    
+    df_clean, df_dropped = processor.get_clean_surface(df_processed)
+    
+    clean_path = full_path.replace("raw", "clean") # data/clean/{TICKER}/...
+    os.makedirs(os.path.dirname(clean_path), exist_ok=True)
+    df_clean.to_parquet(clean_path, index=False)
+    
+    # Save Dropped Data (for Visualization/QC)
+    dropped_path = full_path.replace("raw", "dropped") # data/dropped/SPY/...
+    os.makedirs(os.path.dirname(dropped_path), exist_ok=True)
+    df_dropped.to_parquet(dropped_path, index=False)
 
     print(f"--- ETL Complete ---")
     print(f"Saved: {full_path}")
     print(f"Total Rows: {len(df)}")
 
+    print(f"Full Processed: {len(df_processed)} rows")
+    print(f"Processed saved: {processed_path}")
+
+    print(f"Clean (Vol>0): {len(df_clean)} rows -> {clean_path}")
+
+    
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Equity Option Chain ETL")
     parser.add_argument("--ticker", type=str, default="SPY", help="Underlying Ticker (e.g. SPY, NVDA)")

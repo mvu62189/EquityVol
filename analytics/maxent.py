@@ -3,14 +3,24 @@ from scipy.optimize import minimize
 from scipy.stats import lognorm
 
 class MaxEntModel:
-    def __init__(self, F, T, n_nodes=200, sigma_prior=0.2, custom_prior=None):
+    def __init__(self, F, T, n_nodes=200, sigma_prior=0.2, custom_prior=None, grid_bounds=None):
         self.F = F
         self.T = T
         
         # 1. Define Grid (State Space)
         # We need a dense grid to capture the shape
-        std_dev = F * sigma_prior * np.sqrt(T)
-        self.x = np.linspace(max(0.01, F - 6*std_dev), F + 6*std_dev, n_nodes)
+
+        if grid_bounds is not None:
+            # [CHANGE] Use user-calculated bounds (e.g. based on strikes)
+            x_min, x_max = grid_bounds
+            # Ensure safety buffers
+            x_min = max(0.01, x_min)
+            self.x = np.linspace(x_min, x_max, n_nodes)
+        else:
+            # Fallback: Theoretical 6-sigma range
+            std_dev = F * sigma_prior * np.sqrt(T)
+            self.x = np.linspace(max(0.01, F - 6*std_dev), F + 6*std_dev, n_nodes)
+        
         self.dx = np.diff(self.x)
         self.dx = np.append(self.dx, self.dx[-1])
 
