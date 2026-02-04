@@ -337,3 +337,26 @@ if run:
         yaxis2=dict(title="Liquidity", overlaying='y', side='right', showgrid=False)
     )
     st.plotly_chart(fig_d, width='stretch')
+
+    # --- [NEW] PRINT DENSITY DATA ---
+    st.markdown("### Grid Node Densities")
+    
+    # Create a DataFrame from the model results
+    df_density = pd.DataFrame({
+        "Grid Node (Strike)": model.x,
+        "Density (PDF)": model.pdf,
+        "Prob Mass (~PDF*dx)": model.pdf * model.dx  # Approximate probability in this bin
+    })
+    
+    # Display as an interactive table
+    st.dataframe(df_density, width='stretch')
+    
+    # Optional: Download button
+    csv = df_density.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        "Download Density CSV",
+        csv,
+        "maxent_density.csv",
+        "text/csv",
+        key='download-csv'
+    )
