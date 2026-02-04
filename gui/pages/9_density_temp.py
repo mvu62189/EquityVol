@@ -13,7 +13,7 @@ from analytics.svi import SVIModel
 from analytics.arbitrage import repair_convexity
 
 st.set_page_config(layout="wide", page_title="MaxEnt 3D Surface")
-DATA_DIR = "data/clean"
+DATA_DIR = "data/processed"
 MODEL_DIR = "data/models"
 
 # --- HELPER FUNCTIONS (Exact replicates from Page 6) ---
