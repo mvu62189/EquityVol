@@ -14,7 +14,7 @@ from analytics.svi import SVIModel
 from analytics.arbitrage import repair_convexity
 
 st.set_page_config(layout="wide", page_title="MaxEnt Lab")
-DATA_DIR = "data/clean"
+DATA_DIR = "data/processed"
 MODEL_DIR = "data/models"
 
 # --- HELPER: Dollar Stride Filter ---
@@ -88,6 +88,98 @@ def load_svi_params(ticker, expiry_str):
 
 def put_to_call(put_price, K, F):
     return put_price + (F - K)
+
+def filter_left_tail(K, C, window_size=20.0, scan_limit_pct=0.2):
+    """
+    Scans the left tail (up to scan_limit_pct of data) for the most stable
+    window (convexity ~0, low noise). Returns the start strike of that window.
+    """
+    if len(K) < 10: return K[0]
+
+    # 1. Calculate Derivatives
+    dK = np.diff(K)
+    dC = np.diff(C)
+    
+    # Dual Delta (First Derivative)
+    # delta[i] corresponds to the interval K[i] -> K[i+1]
+    delta = dC / dK
+    
+    # Gamma (Second Derivative)
+    # Calculated at K[1]...K[N-2]
+    # diff(delta) has length N-2
+    mid_k = (K[1:] + K[:-1]) / 2
+    d_mid_k = np.diff(mid_k)
+    gamma = np.diff(delta) / d_mid_k
+
+    # 2. Scan Windows
+    candidates = []
+    
+    # Only scan the left portion (e.g., first 40% of strikes)
+    scan_limit = K[int(len(K) * scan_limit_pct)]
+    
+    for i in range(len(K)):
+        start_k = K[i]
+        if start_k > scan_limit: break
+        
+        # Define window range
+        end_k = start_k + window_size
+        
+        # Identify indices inside this window
+        # For Delta: delta[j] is valid if K[j] >= start and K[j+1] <= end
+        # Simple approximation: just check K[j] in range
+        
+        mask = (K >= start_k) & (K < end_k)
+        indices = np.where(mask)[0]
+        
+        if len(indices) < 4: continue # Need enough points for stats
+        
+        # Extract Delta Slice (len N-1)
+        # We take indices that fit within the delta array bounds
+        idx_d = indices[indices < len(delta)]
+        if len(idx_d) < 2: continue
+        win_delta = delta[idx_d]
+        
+        # Extract Gamma Slice (len N-2)
+        # Gamma is shifted by 1 relative to K (gamma[0] is at K[1])
+        # So K[j] roughly maps to gamma[j-1]
+        idx_g = indices - 1
+        idx_g = idx_g[(idx_g >= 0) & (idx_g < len(gamma))]
+        if len(idx_g) < 2: continue
+        win_gamma = gamma[idx_g]
+        
+        # 3. Score the Window
+        # Metric A: Convexity Magnitude (Should be ~0 for linear tail)
+        mag_gamma = np.mean(np.abs(win_gamma))
+        
+        # Metric B: Stability (Movement)
+        # Std Dev of Delta + Weight * Std Dev of Gamma
+        # Gamma is usually small, so we weight it up to make it comparable
+        movement_score = np.std(win_delta) + (100 * np.std(win_gamma))
+        
+        candidates.append({
+            'start_k': start_k,
+            'mag_gamma': mag_gamma,
+            'score': movement_score
+        })
+    
+    if not candidates: return K[0]
+    
+    df_cand = pd.DataFrame(candidates)
+    
+    # 4. Filter & Select
+    # Filter 1: Convexity must be reasonably close to zero (avoid the smile body)
+    # We take the median of the scanned gamma magnitudes as a baseline threshold
+    # or a hard cutoff if the tail is very clean.
+    gamma_threshold = df_cand['mag_gamma'].quantile(0.50) 
+    valid = df_cand[df_cand['mag_gamma'] <= max(gamma_threshold, 1e-5)]
+    
+    if valid.empty: 
+        best_row = df_cand.loc[df_cand['score'].idxmin()]
+    else:
+        # Filter 2: Lowest Movement Score
+        best_row = valid.loc[valid['score'].idxmin()]
+        
+    return best_row['start_k']
 
 # --- Main App ---
 st.title("Non-Parametric Density (MaxEnt)")
@@ -211,12 +303,7 @@ with st.sidebar:
     st.markdown("---")
     st.header("Grid Settings")
     
-    # [NEW] Grid Logic
-    grid_buffer_dollars = st.number_input(
-        "Buffer ($)", min_value=0.0, value=0.0, step=5.0,
-        help="Amount to extend grid beyond Min/Max strikes."
-    )
-    
+        
     grid_multiple = st.slider(
         "Grid Multiplier", min_value=0.1, max_value=10.0, value=1.0, step=0.1,
         help="Gap Size / Grid Step. 1.0 = Grid nodes align with gap size. 0.5 = Twice as dense."
@@ -224,7 +311,7 @@ with st.sidebar:
     
     # Calculate Nodes
     # Formula: Total Width / (Gap * Multiple)
-    width = (st.session_state.range_max - st.session_state.range_min) + (2 * grid_buffer_dollars)
+    width = (st.session_state.range_max - st.session_state.range_min)
     target_step = dollar_stride * grid_multiple
     
     calc_nodes = int(width / target_step) + 1
@@ -256,13 +343,52 @@ if run:
         if adj_count > 0:
             st.toast(f"🔧 Repaired {adj_count} prices.")
 
+    # --- [NEW] TAIL FILTERING LOGIC ---
+    # Perform this BEFORE grid setup, so the grid adapts to the truncated range
+    # Find the best start point (rolling $20 window)
+    suggested_min_k = filter_left_tail(K_vec, C_vec, window_size=20.0)
+    
+    # Apply the Cut
+    if suggested_min_k > K_vec[0]:
+        mask_keep = K_vec >= suggested_min_k
+        
+        # Safety: Ensure we don't delete too much data (keep at least 10 points or 50%)
+        if np.sum(mask_keep) > 10:
+            cut_count = len(K_vec) - np.sum(mask_keep)
+            st.toast(f"✂️ Tail Filter: Cut {cut_count} strikes < {suggested_min_k:.2f}")
+            K_vec = K_vec[mask_keep]
+            C_vec = C_vec[mask_keep]
+
+    # ----------------------------------
+
+    current_min = min(K_vec)
+    current_max = max(K_vec)
+    
+    # 1. Calculate the new physical width of the grid
+    new_width = (current_max - current_min)
+    
+    # 2. Recalculate the target step size using the sidebar settings
+    # (These variables are accessible here)
+    target_step = dollar_stride * grid_multiple
+    
+    # 3. Compute new node count
+    # We use max(10, ...) to prevent crashing if the range is tiny
+    new_n_nodes = int(new_width / target_step) + 1
+    new_n_nodes = max(10, new_n_nodes)
+
+    if new_n_nodes != n_nodes:
+        st.caption(f"🔄 Grid resized due to filter: **{n_nodes}** ➝ **{new_n_nodes}** nodes (maintaining ~${target_step:.2f} step)")
+        n_nodes = new_n_nodes
+        
+    # ------------------------------------
+
     if len(K_vec) < 3:
         st.error("Too few points remaining.")
         st.stop()
 
     # 3. Dynamic Grid
-    grid_min = min(K_vec) - grid_buffer_dollars
-    grid_max = max(K_vec) + grid_buffer_dollars
+    grid_min = min(K_vec)
+    grid_max = max(K_vec)
     
     # 4. Solve
     model = MaxEntModel(F, T, n_nodes=n_nodes, grid_bounds=(grid_min, grid_max))
